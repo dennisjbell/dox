@@ -1,6 +1,7 @@
 #!/bin/bash
 unset IFS
 shopt -s nullglob
+SCRIPT_NAME="$(basename $0)"
 
 : <<'dox-overview:dox'
 USAGE
@@ -22,9 +23,9 @@ CONCEPTS
 	`<<SCRIPT_NAME>> help --concept <concept-name>`.
 
 COMMON COMMANDS
-@~include=topic{"category":"command","scope":"common","leader":"  genesis ","desc":"inline"}
+@~include=topic{"category":"command","scope":"common","leader":"  <<SCRIPT_NAME>> ","desc":"inline"}
 
-  For more details, run `genesis help <command>`
+  For more details, run `<<SCRIPT_NAME>> help <command>`
 dox-overview:dox
 
 : <<'dox-concept:Helptext-Structure'

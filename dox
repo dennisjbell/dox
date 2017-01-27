@@ -1,0 +1,508 @@
+#!/bin/bash
+unset IFS
+shopt -s nullglob
+
+: <<'dox-overview:dox'
+USAGE
+@~include=usage{"cmd":"<command> [options] [arguments]"}
+
+DESCRIPTION
+  Dox is an in-file help provider for singular bash scripts that organize their
+  functionality into multiple subcommands and options.
+
+  At its simplest, it allows you to put text above functions to allow both
+  users and developers to look at the functionality being provided.  But it
+  also follows the DRY ideology to link help when cross-referencing related
+  functionality.
+
+CONCEPTS
+@~include=topic{"category":"concept","leader":"    ","scope":"dox","desc":"block"}
+
+	More details are available for each concept by running
+	`<<SCRIPT_NAME>> help --concept <concept-name>`.
+
+COMMON COMMANDS
+@~include=topic{"category":"command","scope":"common","leader":"  genesis ","desc":"inline"}
+
+  For more details, run `genesis help <command>`
+dox-overview:dox
+
+: <<'dox-concept:Helptext-Structure'
+dox-concept:Helptext-Structure
+
+: <<'dox-concept:Usage-Helper'
+dox-concept:Usage-Helper
+
+: <<'dox-concept:Meta-instructions'
+dox-concept:Meta-instructions
+
+: <<'dox-concept:Helptext-structure'
+dox-concept:Helptext-structure
+
+: <<'dox-command:help'
+NAME
+	help - Sample help command that supports dox interface
+
+USAGE
+@~include=usage{"args":[" ","--topics","--<category>","[--<category>] <topic>"]}
+
+DESCRIPTION
+	Get help on how to use `<<SCRIPT_NAME>>`.
+
+	With no arguments, will print this help message.  By specifying a category,
+	the list of topics in that category will be specified.  The available
+	categories are:
+@~include=categories{"leader":"    * "}
+
+  You can also specify --topics to get a list of all topics in all categories.
+
+	For detailed help on a given topic, you can specify that topic as an argument
+	to the help command.  For topics that are composed of multiple words, do
+	*not* wrap the topic in quotes.  In the rare case that the topic appears in
+	multiple categories, you can specify the category type as an double-hyphenated
+	option.
+dox-command:help
+
+cmd_help() {
+	local category=""
+	local topic=""
+	while (( $# )); do
+		arg="$1"; shift
+		case "${arg}" in
+		(--*) [[ -z "$category" ]] && category="${arg:2}" || bad_usage "Can only specify one category" ;;
+		(-*) bad_usage_invalid_opt "$arg";;
+		(*)  topic="${topic:+"${topic}-"}${arg}" ;;
+		esac
+	done
+
+	local result=$(__dox_get_help "$category" "$topic")
+	if [[ $? -ne 0 ]] ; then
+		echo >&2 "ERROR: Could not fetch help - fatal internal error"
+		exit 1
+	fi
+
+	local pager="cat"
+  # The following pages if output is bigger than the current screen Not enabled
+  # by default, but uncomment to enable.
+	#local rows="$(stty -a | head -1 | tr ';' "\n" | grep rows | sed -e 's/^[^0-9]*\([0-9]\{1,\}\).*$/\1/')"
+	#[[ "$rows" -gt 1 && "$(echo "$result" | wc -l)" -ge "$rows" ]] && pager="less"
+	echo "$result"$'\n' | $pager
+}
+
+# Help Support: Bad Usage -- call from within commands to automatically support
+#               usage information. It assumes the command functions are named
+#               cmd_<command>_<subcommand-level1>_<subcommand-level2>_<etc...>
+#               Modify the `[[ "$category" == "cmd" ]] && category="command"` line
+#               below if you use a different system.
+bad_usage() {
+  local msg="${1:-bad usage}" callee=${2:-${FUNCNAME[1]}}
+
+  local callee_bits=( ${callee//_/ } )
+  local category="${callee_bits[0]}"
+  local name=( "${callee_bits[@]:1}" )
+  local cmd=$(IFS='-'; echo "${name[*]}")
+
+  [[ "$category" == "cmd" ]] && category="command"
+  local content="$(__dox_get_usage "$cmd" "$category")"
+  local prefix="[$SCRIPT_NAME${name:+ ${name[@]}}] "
+  echo >&2 $'\n'"$(__dox_reflow_text "ERROR: ${msg}" "${prefix//?/ }" "$prefix")"
+  echo >&2 "$(__dox_process_content "USAGE"$'\n'"${content}")"
+  echo >&2 $'\n'"For more details, run \`${SCRIPT_NAME} help <command>\` for the desired command."$'\n'
+  exit 1
+}
+
+# Convenience wrappers for consistant bad_usage output for specific conditions
+bad_usage_invalid_opt() { bad_usage "invalid option '$1'" "${FUNCNAME[1]}"; }
+bad_usage_no_args()     { bad_usage "does not take any options or arguments" "${FUNCNAME[1]}"; }
+bad_usage_no_opts()     { bad_usage "does not take any options" "${FUNCNAME[1]}"; }
+bad_usage_missing()     { bad_usage "required argument for '$1' not provided" "${FUNCNAME[1]}"; }
+bad_usage_extra()       { bad_usage "extraneous argument '${1}'${2:+"; $2 already provided as '$3'"}" "${FUNCNAME[1]}"; }
+
+bad_usage_partial() {
+	local cmd="$1" subcmd="$2"
+	if [[ -n "$subcmd" ]] ; then
+		bad_usage "invalid subcommand '${subcmd}'${cmd:+" for command '${cmd}'"}" "partial_${cmd}"
+	else
+		bad_usage "missing subcommand for '${cmd}' command" "partial_${cmd}"
+	fi
+}
+
+__dox_check_opt_usage() {
+	if [[ -z "$2" || "${2:0:1}" == '-' ]] ; then
+		bad_usage "missing value for option $1" "${FUNCNAME[1]}"
+	fi
+}
+
+__dox_get_help() {
+  local category="$1" topic="$2"
+	[[ -z "${topic}" && -z "${category}" ]] && { category="command"; topic="help"; }
+	if [[ -z "${topic}" ]] ; then
+		[[ "$category" == 'topics' ]] && { category='' ; } # --topics is a meta-topic of all topics
+		IFS=$'\n' read -rd '' -a categories <<< "$(__dox_get_topics '' "$category" | sed 's/:.*//' | sort | uniq )"
+		echo ""
+		if [[ "${#categories[@]}" -eq 0 ]] ; then
+			echo >&2 $'\n'"[$SCRIPT_NAME help] ERROR: No help category matching '$category'"
+			echo >&2 $'\n''For information on available help topics, run `'"${SCRIPT_NAME}"' help --topics`'
+			exit 2
+		fi
+		for category in "${categories[@]}" ; do
+			[[ "${category}" == "partial" ]] && continue
+			local _header="Available '${category}' help topics:"
+			echo "${_header}"$'\n'"${_header//?/-}"
+			__dox_generate_topic_includes '{"category":"'$category'","desc":"inline","leader":"  * "}'
+			echo ""
+		done
+		exit 0
+	fi
+
+	local topic_list=( $(__dox_get_topics "$topic" "$category" ) )
+	if [[ "${#topic_list[@]}" -eq 0 ]] ; then
+		# Check for aliases
+		if grep '^@~alias=\(.*,\)\{0,\}'"$topic"'\(,.*\)\{0,\}' $0 >/dev/null 2>&1; then
+			topic_list=( $(__dox_get_topics '' "$category" '' "$topic" ) )
+		fi
+	fi
+	if [[ ${#topic_list[@]} -eq 1 ]] ; then
+		# Only one potential match
+		IFS=':' read category topic <<< "${topic_list[0]}"
+	elif [[ ${#topic_list[@]} -eq 0 ]] ; then
+		__dox_not_found
+	else
+		local exact_match
+		exact_match=( $(printf -- '%s\n' "${topic_list[@]}" | grep ':'"$topic"'$') )
+		if [[ ${#exact_match[@]} -eq 1 ]] ; then
+			IFS=':' read category topic <<< "${exact_match[0]}"
+		else
+			__dox_ambiguous_topic "$topic" "${topic_list[@]}"
+			return 2
+		fi
+	fi
+
+	if [[ "$category" == 'partial' ]] ; then
+		__dox_ambiguous_topic "$topic"
+		return 0
+	else
+		category="${category:-command}"
+		local content="$(__dox_get_content "${topic}" "${category}")"
+		__dox_process_content "$content"
+	fi
+	return 0
+}
+__dox_get_content() {
+	#echo >&2 "======"$'\n'"DEBUG: called '${FUNCNAME[0]}' with "$'\n'" --($@)--"$'\n'"^^^^^^"
+	local topic="$1" category="${2:-'command'}"
+	local pattern="$(echo "dox-${category}:${topic}" | tr " " "-")"
+	# Check if content is present
+	if grep "^: <<'$pattern'\$" $0 >/dev/null 2>&1 && grep "^$pattern\$" $0 >/dev/null 2>&1; then
+		# FIXME: changing all tabs to 2 spaces; ideally this should only change leading tabs
+		local content="$(sed \
+			-e 's/	/  /g;'"/^: <<'$pattern'/,/^$pattern\$/"'!d;//d' \
+			-e "s:<<[S]CRIPT_NAME>>:$SCRIPT_NAME:g" \
+			$0 )"
+
+		# Process usage includes
+		declare -a uses
+		IFS=$'\n'	read -rd '' -a uses <<< "$(__dox_get_meta "$content" 'include' 'usage')"
+		local _line
+		for _line in "${uses[@]}" ; do
+			local opts="${_line:5}"
+			local usage="$(__dox_generate_usage "$topic" "${opts:-"{}"}" )"
+			content="$( __dox_replace_line "$content" "@~include=${_line}" "$usage" )"
+		done
+		echo "$content"
+	fi
+}
+
+__dox_get_usage() {
+	local topic="$1" category="${2:-'command'}"
+	local content="${3:-"$(__dox_get_content "$topic" "$category")"}"
+	local usage="$(__dox_parse_section "$content" 'USAGE')"
+	if [[ -z "$usage" && "$category" == "partial" ]] ; then
+		usage='@~include=topic{"category":"command","desc":"usage","leader":"  ","partial":"'"${topic}"'"}'
+	fi
+	echo "$usage" | grep -v '^@~alias'
+
+}
+
+__dox_process_content() {
+	local _tail=$'\n'" "
+	local content="$1${_tail}"
+
+	# Process meta details
+	declare -a includes
+	IFS=$'\n' read -rd '' -a includes <<< "$(__dox_get_meta "$content" include)"
+	local _tag
+	for _tag in "${includes[@]}"; do
+		local replacement=""
+		case "${_tag%\{*}" in
+			(topic)      replacement="$(__dox_generate_topic_includes "${_tag:5}")" ;;
+			(categories) replacement="$(__dox_generate_category_list "${_tag:10}")" ;;
+      (related)    replacement="$(__dox_generate_related_list "${_tag:7}")" ;;
+			(*)          replacement='' ;;
+		esac
+		content="$( __dox_replace_line "$content" "@~include=${_tag}" "$replacement" )"
+	done
+	echo $'\n'"$( __dox_trim "${content}")"$'\n'
+}
+
+__dox_replace_line() {
+	# Args: content, line, replacement
+	while IFS= read -r line; do
+		if [[ "$line" == "$2" ]] ; then
+#			[[ -z "$3" ]] && continue
+			line="$3"
+		fi
+		echo "$line"
+	done <<< "$1"
+}
+
+__dox_not_found() {
+	echo >&2 $'\n'"[$SCRIPT_NAME help] ERROR: No help topic matching '${argv[@]:1}'"
+	echo >&2 $'\n''For information on available help topics, run `'"${SCRIPT_NAME}"' help --topics`'
+	exit 2
+}
+
+__dox_ambiguous_topic() {
+	local topic=$1 ; shift
+	local _args=( "$@" )
+	local content="$(__dox_get_content $topic 'partial')"
+
+	# We only use the description and usage from partials
+	local _usage="$(__dox_get_usage $topic 'partial' "$content")"
+	local _desc="$(__dox_parse_section "$content" DESCRIPTION)"
+	[[ -n "$_desc" ]] || { _desc="  This is a partial command stub which requires further arguments." ; }
+
+	content="$(cat<<EOF
+USAGE
+$_usage
+
+DESCRIPTION
+$_desc
+
+@~include=topic{"category":"concept","desc":"block","leader":"  ","partial":"${topic}"}
+
+COMMANDS
+@~include=topic{"category":"command","desc":"inline","leader":"  ","partial":"${topic}"}
+
+  For more details, run \`$SCRIPT_NAME help <command>\` for the desired command.
+EOF)"
+
+	__dox_process_content "$content"
+}
+
+__dox_get_meta() {
+	local content="$1" key=${2:-'.*'} sep="=${3:+"${3}\\b"}" filter=${2:+"$2="}
+	echo "$content" | grep '^@~'"$key$sep" | sed 's/^@~'"$filter"'//'
+}
+
+__dox_get_meta_option() {
+	local meta_str="$1" option="$2"
+	opt_line="$(echo "$meta_str" | sed 's/^[^{]*\(.*\)[^}]*$/\1/')"
+	case "$(echo "$opt_line" | jq -r ".$option | type")" in
+		(array)
+			i=0; while value="$(echo "$opt_line" | jq -er ".${option}[${i}]")" ; do
+				echo $value
+				((i++))
+			done
+			;;
+		(null) return 1;;
+		(*)    echo "$opt_line" | jq  -er ".$option" ;;
+	esac
+}
+
+__dox_get_sections() {
+	echo "$1" | grep '^[A-Z][-A-Z0-1 ]*'
+}
+
+__dox_parse_section() {
+	local content="$1" subject="$2"
+	local output
+	if [[ -n "$subject" ]] ; then
+		_found=false
+		_nl=""
+		while IFS= read -r line; do
+			[[ "${line}" =~ ^${subject} ]] && { _found=true ; continue ; }
+			[[ ${_found} == true ]]  || { continue ; }
+			[[ "${line}" =~ ^[^[:space:]@] ]] && { break ; }
+			[[ "${line}" =~ ^$ ]] && { _nl="${_nl}"$'\n' ; continue ; }
+			echo "${_nl}${line}" ; _nl=""
+		done <<< "$content"
+	fi
+}
+
+__dox_get_topics() {
+	#echo >&2 "======"$'\n'"DEBUG: called '${FUNCNAME[0]}' with "$'\n'" --($@)--"$'\n'"^^^^^^"
+	local topic="${1:-.*}" category="${2:-.*}" scope="$3" alias="$4"
+	local candidates=( $(grep '^: <<'"'dox-${category}:${topic}\(-.*\)\?'\$" $0 | sed 's/.*'".dox-//;s/.\$//") )
+	for candidate in "${candidates[@]}" ; do
+		if [[ -n $scope ]] ; then
+			IFS=':' read category topic <<< "$candidate"
+			if __dox_get_content $topic $category | grep '@~scope=\(.*,\)\{0,\}'"$scope"'\(,.*\)\{0,\}' 2>&1 > /dev/null ; then
+				echo $candidate
+			fi
+		elif [[ -n $alias ]] ; then
+			IFS=':' read category topic <<< "$candidate"
+			if __dox_get_content $topic $category | grep '@~alias=\(.*,\)\{0,\}'"$alias"'\(,.*\)\{0,\}' 2>&1 > /dev/null ; then
+				echo $candidate
+			fi
+		else
+			echo $candidate
+		fi
+	done
+}
+
+__dox_generate_topic_includes() {
+	local opts="$1"
+	local scope="$(__dox_get_meta_option "${opts}" scope)"
+	local category="$(__dox_get_meta_option "${opts}" category)"
+	local partial="$(__dox_get_meta_option "${opts}" partial)"
+	local leader="$(__dox_get_meta_option "${opts}" leader)"
+	local desc="$(__dox_get_meta_option "${opts}" desc)"
+	local items=( $(__dox_get_topics "$partial" "$category" "$scope") )
+
+	local item
+	if [[ "${desc}" == "inline" ]] ; then
+		local indent=0
+		for item in "${items[@]}" ; do
+			local _header="${leader}${item#*:}: "
+			[[ "${indent}" -ge "${#_header}" ]] || { indent="${#_header}" ; }
+		done
+		local padding="$(seq -f ' ' -s '' $indent)"
+	fi
+
+	for item in "${items[@]}" ; do
+		local _header="${leader}""$(echo "${item#*:}" | sed -e 's/-/ /g')"":"
+		case "${desc}" in
+			(inline)
+				local _desc
+				_desc="$( __dox_parse_section "$(__dox_get_content "${item#*:}" "${item%%:*}" )"  DESCRIPTION )"
+				__dox_reflow_text "${_desc%%$'\n'$'\n'*}" "$padding" "${_header}${padding:${#_header}}"
+				echo ""
+				;;
+			(block)
+				echo "${_header}"
+				local _desc
+				_desc="$( __dox_parse_section "$(__dox_get_content "${item#*:}" "${item%%:*}" )"  DESCRIPTION )"
+				__dox_reflow_text "${_desc%%$'\n'$'\n'*}" "${leader}  "
+				echo ""
+				;;
+			(usage)
+				_desc="$( __dox_parse_section "$( __dox_get_content "${item#*:}" "${item%%:*}" )" USAGE | grep -v '^@~')"
+				while read -r line ; do echo "${leader}${line}" ; done <<< "$_desc"
+				;;
+			(*)
+				echo "${_header/%:/}"
+				;;
+		esac
+	done
+}
+
+__dox_generate_category_list() {
+	local opts="$1"
+	local leader="$( __dox_get_meta_option "${opts}" "leader" )"
+	local items=("commands" "concepts") # hardcoded for now
+	for category in "${items[@]}" ; do
+		echo "${leader}${category}"
+	done
+}
+
+__dox_generate_related_list() {
+	local opts="$1"
+	local desc=''
+	local category
+  declare -a items
+	IFS=$'\n' items=( $( __dox_get_meta_option "${opts}" "items" ) )
+	unset IFS
+	for topic in "${items[@]}" ; do
+		category="${topic%%:*}"
+		if [[ "$category" == "$topic" ]] ; then
+			category=""
+		else
+			topic="${topic#*:}"
+		fi
+		_desc="$( __dox_parse_section "$(__dox_get_content "$topic" "$category")" DESCRIPTION "" )"
+		[[ -n "$_desc" ]] || continue
+		echo "  $topic${category:+" ($category)"}:"
+		__dox_reflow_text "${_desc%%$'\n'$'\n'*}" "    "
+		echo ""
+	done
+}
+
+__dox_generate_usage() {
+	local topic="$1"
+	local opts="$2"
+	local args
+	local leader="$(__dox_get_meta_option "${opts}" "leader" )"
+	local cmd="$(__dox_get_meta_option "${opts}" "cmd" )"
+
+	#FIXME: this doesn't allow empty strings as a valid arg, necessitating using ' ' for no args
+	IFS=$'\n' args=( $(__dox_get_meta_option "${opts}" "args" ) )
+	unset IFS
+	leader="${leader:-"  "}"
+	cmd="${cmd:-"$(echo "$topic" | tr "-" " ")"}"
+
+	[[ ${#args[@]} -gt 0 ]] || args+='' # default with no arguments
+	local arg_set
+	for arg_set in "${args[@]}" ; do
+		echo "${leader}${SCRIPT_NAME} ${cmd} ${arg_set}"
+	done
+}
+
+__dox_reflow_text() {
+	local content="$(echo ${1} | expand -t 2)"
+	local leader="$2"
+	local header="$3"
+	local width=$(( 79 - ${#leader} ))
+	unset IFS
+	while read -r line ; do
+		echo "${header:-$leader}${line}"
+		header=""
+	done <<< "$(set +x; echo ${content} | fold -s -w $width)"
+}
+__dox_trim() {
+	# trims unused meta, whitespace off end and collapse inner multiple blank lines
+	content="$( echo "$1" | grep -v '^@~.*')"
+	i=${#content}
+	while (( i-- )) ; do [[ "${content:$i:1}" =~ ^[[:space:]]$ ]] || { break ; } ; done
+	echo "${content:0:$(( ++i ))}" | cat -s
+}
+
+
+####################################################
+# multi-call interace
+
+main() {
+	unset IFS
+	local cmd=${1:-info} ; shift
+	case ${cmd} in
+		(ping)                   exit 0 ;;
+		(version)                cmd_version $* ;;
+		(help)                   cmd_help $* ;;
+		(info)                   cmd_help --overview dox ;;
+		(multi)                  # Multi-part command with subcommands
+			local arg=${1:-} ; shift
+			case ${arg} in
+				(this)               cmd_multi_this $* ;;
+				(that)               cmd_multi_that $* ;;
+				(another|alias)      cmd_multi_another $* ;;
+				(*)                  bad_usage_partial "${cmd}" ${arg} ;;
+			esac
+			;;
+		(*)                      bad_usage_partial "" "$cmd" ;;
+	esac
+}
+
+# look for some help flags
+declare -a argv
+while (( $# != 0 )); do
+	case ${1} in
+	(-h|-\?|--help) argv=( help    ${argv[@]}        ) ;;
+	(-v|--version)  argv=( version ${argv[@]}        ) ;;
+	(*)             argv=(         ${argv[@]} "${1}" ) ;;
+	esac
+	shift
+done
+set -- ${argv[@]}
+main $@
+
+# fin
